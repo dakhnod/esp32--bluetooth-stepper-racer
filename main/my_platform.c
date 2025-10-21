@@ -6,24 +6,98 @@
 #include <uni.h>
 
 #include <driver/ledc.h>
+#include <driver/gpio.h>
+#include <esp_timer.h>
 #include <math.h>
+#include "esp_attr.h"
 
-#define LEDC_TIMER              LEDC_TIMER_0
-#define LEDC_MODE               LEDC_LOW_SPEED_MODE
-#define LEDC_OUTPUT_IO          (5) // Define the output GPIO
-#define LEDC_CHANNEL            LEDC_CHANNEL_0
-#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Set duty resolution to 13 bits
+#define LEDC_MODE               LEDC_HIGH_SPEED_MODE
+#define LEDC_DUTY_RES           LEDC_TIMER_10_BIT // Set duty resolution to 13 bits
 #define LEDC_DUTY               pow(2, LEDC_DUTY_RES - 1) // Set duty to 50%. (2 ** 13) * 50% = 4096
-#define LEDC_FREQUENCY          (4000) // Frequency in Hertz. Set frequency at 4 kHz
 
-// Custom "instance"
-typedef struct my_platform_instance_s {
-    uni_gamepad_seat_t gamepad_seat;  // which "seat" is being used
-} my_platform_instance_t;
+#define PIN_ENABLE 27
+
+#define LEFT_DIR 25
+#define RIGHT_DIR 32
+
+#define LEFT_STEP 26
+#define RIGHT_STEP 33
+
+#define SERVO_RIGHT_PIN 4
+#define SERVO_LEFT_PIN 15
+
+#define LED_BUILTIN 1
+
+#define PIN_PDN_UART 16
+
+#ifndef max
+#define max(a,b) (((a) > (b)) ? (a) : (b))
+#endif
+
+int pin_states[] = {
+    PIN_ENABLE, 1,
+    PIN_PDN_UART, 1,
+    LEFT_DIR, 0,
+    RIGHT_DIR, 1,
+    LEFT_STEP, 0,
+    RIGHT_STEP, 0
+};
+
+int step_pins[] = {LEFT_STEP, RIGHT_STEP};
+
+static esp_timer_handle_t step_timers[2];
 
 // Declarations
 static void trigger_event_on_gamepad(uni_hid_device_t* d);
-static my_platform_instance_t* get_my_platform_instance(uni_hid_device_t* d);
+
+volatile int step_intervals[] = {0, 0};
+volatile bool step_states[] = {false, false};
+
+void IRAM_ATTR step_timer_callback(void *arg) {
+    int index = (int) arg;
+
+    if(step_intervals[index] == 0) {
+        return;
+    }
+
+    bool state = step_states[index];
+
+    gpio_set_level(step_pins[index], state);
+
+    esp_timer_restart(step_timers[index], step_intervals[index]);
+
+    step_states[index] = !state;
+}
+
+void set_frequency(int index, int freq) {
+    // step_intervals[index] = 2000000 / freq;
+    // Prepare and then apply the LEDC PWM timer configuration
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode       = LEDC_MODE,
+        .duty_resolution  = LEDC_DUTY_RES,
+        .timer_num        = index,
+        .freq_hz          = freq,  // Set output frequency at 4 kHz
+        .clk_cfg          = LEDC_AUTO_CLK
+        // .clk_cfg          = LEDC_USE_REF_TICK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+}
+
+void configure_channel(int index) {
+    // Prepare and then apply the LEDC PWM channel configuration
+    ledc_channel_config_t ledc_channel = {
+        .speed_mode     = LEDC_MODE,
+        .channel        = index,
+        .timer_sel      = index,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = step_pins[index],
+        .duty           = LEDC_DUTY,
+        .hpoint         = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+
+    // ledc_stop(LEDC_MODE, index, 0);
+}
 
 //
 // Platform Overrides
@@ -33,33 +107,43 @@ static void my_platform_init(int argc, const char** argv) {
     ARG_UNUSED(argv);
 
     logi("custom: init()\n");
-    // Prepare and then apply the LEDC PWM timer configuration
-    ledc_timer_config_t ledc_timer = {
-        .speed_mode       = LEDC_MODE,
-        .duty_resolution  = LEDC_DUTY_RES,
-        .timer_num        = LEDC_TIMER,
-        .freq_hz          = LEDC_FREQUENCY,  // Set output frequency at 4 kHz
-        .clk_cfg          = LEDC_AUTO_CLK
-        // .clk_cfg          = LEDC_USE_REF_TICK
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
 
-    // Prepare and then apply the LEDC PWM channel configuration
-    ledc_channel_config_t ledc_channel = {
-        .speed_mode     = LEDC_MODE,
-        .channel        = LEDC_CHANNEL,
-        .timer_sel      = LEDC_TIMER,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = LEDC_OUTPUT_IO,
-        .duty           = 0, // Set duty to 0%
-        .hpoint         = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+    // configure_channel(0);
+    // configure_channel(1);
 
-    // Set duty to 50%
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, LEDC_DUTY));
-    // Update duty to apply the new value
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
+    // set_frequency(0, 1000);
+    // set_frequency(1, 1000);
+
+    for(int i = 0; i < sizeof(pin_states) / sizeof(pin_states[0]); i += 2) {
+        gpio_set_direction(pin_states[i], GPIO_MODE_OUTPUT);
+        gpio_set_level(pin_states[i], pin_states[i + 1]);
+    }
+
+    return;
+
+    const esp_timer_create_args_t left_step_timer_args = {
+        .callback = &step_timer_callback,
+        .name = "left_step_timer",
+        .dispatch_method = ESP_TIMER_ISR,
+        .arg = (void*) 0
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&left_step_timer_args, step_timers + 0));
+
+    const esp_timer_create_args_t right_step_timer_args = {
+        .callback = &step_timer_callback,
+        .name = "right_step_timer",
+        .dispatch_method = ESP_TIMER_ISR,
+        .arg = (void*) 1
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&right_step_timer_args, step_timers + 1));
+
+    for(int i = 0; i < sizeof(pin_states) / sizeof(pin_states[0]); i += 2) {
+        gpio_set_direction(pin_states[i], GPIO_MODE_OUTPUT);
+        gpio_set_level(pin_states[i], pin_states[i + 1]);
+    }
+
+    ESP_ERROR_CHECK(esp_timer_start_periodic(step_timers[0], 1000));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(step_timers[1], 1000));
 }
 
 static void my_platform_on_init_complete(void) {
@@ -72,7 +156,7 @@ static void my_platform_on_init_complete(void) {
     uni_bt_allow_incoming_connections(true);
 
     // Based on runtime condition, you can delete or list the stored BT keys.
-    if (1)
+    if (0)
         uni_bt_del_keys_unsafe();
     else
         uni_bt_list_keys_unsafe();
@@ -105,8 +189,6 @@ static void my_platform_on_device_disconnected(uni_hid_device_t* d) {
 
 static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
     logi("custom: device ready: %p\n", d);
-    my_platform_instance_t* ins = get_my_platform_instance(d);
-    ins->gamepad_seat = GAMEPAD_SEAT_A;
 
     trigger_event_on_gamepad(d);
     return UNI_ERROR_SUCCESS;
@@ -138,18 +220,55 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
 
     static bool pwm_enabled = false;
 
-    if(gp->throttle == 0) {
+    static int last_throttle = 0;
+    static int last_rx = 0;
+
+    int collective = gp->throttle;
+
+    if(gp->break) {}
+
+    int delta = abs(last_throttle - collective);
+
+    /*
+    if((collective != 0) && (collective < 1020) && (delta < 100)) {
+        return;
+    }
+    */
+
+    if((last_throttle == collective)) {
+        // return;
+    }
+
+    last_throttle = collective;
+
+    if(collective == 0) {
         if(!pwm_enabled) {
             return;
         }
-        ledc_stop(LEDC_MODE, LEDC_CHANNEL, 0);
+        gpio_set_level(PIN_ENABLE, 1);
+
+        ledc_stop(LEDC_MODE, 0, 0);
+        ledc_stop(LEDC_MODE, 1, 0);
+
         pwm_enabled = false;
         return;
     }
 
-    // ledc_set_freq(LEDC_MODE, LEDC_TIMER, 10);
+    collective *= 6;
+
+    int axis = gp->axis_rx * 3;
+
+    set_frequency(0, max(collective + axis, 1));
+    set_frequency(1, max(collective - axis, 1));
+
+    if(!pwm_enabled) {
+        gpio_set_level(PIN_ENABLE, 0);
+        configure_channel(0);
+        configure_channel(1);
+    }
+
     pwm_enabled = true;
-    logi("axis: %d\n", gp->throttle);
+    logi("axis: %d\n", collective);
 }
 
 static const uni_property_t* my_platform_get_property(uni_property_idx_t idx) {
@@ -168,9 +287,6 @@ static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data)
             }
             logi("custom: on_device_oob_event(): %d\n", event);
 
-            my_platform_instance_t* ins = get_my_platform_instance(d);
-            ins->gamepad_seat = ins->gamepad_seat == GAMEPAD_SEAT_A ? GAMEPAD_SEAT_B : GAMEPAD_SEAT_A;
-
             trigger_event_on_gamepad(d);
             break;
         }
@@ -185,31 +301,8 @@ static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data)
     }
 }
 
-//
-// Helpers
-//
-static my_platform_instance_t* get_my_platform_instance(uni_hid_device_t* d) {
-    return (my_platform_instance_t*)&d->platform_data[0];
-}
-
 static void trigger_event_on_gamepad(uni_hid_device_t* d) {
-    my_platform_instance_t* ins = get_my_platform_instance(d);
-
-    if (d->report_parser.play_dual_rumble != NULL) {
-        d->report_parser.play_dual_rumble(d, 0 /* delayed start ms */, 150 /* duration ms */, 128 /* weak magnitude */,
-                                          40 /* strong magnitude */);
-    }
-
-    if (d->report_parser.set_player_leds != NULL) {
-        d->report_parser.set_player_leds(d, ins->gamepad_seat);
-    }
-
-    if (d->report_parser.set_lightbar_color != NULL) {
-        uint8_t red = (ins->gamepad_seat & 0x01) ? 0xff : 0;
-        uint8_t green = (ins->gamepad_seat & 0x02) ? 0xff : 0;
-        uint8_t blue = (ins->gamepad_seat & 0x04) ? 0xff : 0;
-        d->report_parser.set_lightbar_color(d, red, green, blue);
-    }
+    
 }
 
 //
