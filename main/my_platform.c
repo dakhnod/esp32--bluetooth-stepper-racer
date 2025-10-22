@@ -10,6 +10,7 @@
 #include <esp_timer.h>
 #include <math.h>
 #include "esp_attr.h"
+#include <btstack.h>
 
 #define LEDC_MODE               LEDC_HIGH_SPEED_MODE
 #define LEDC_DUTY_RES           LEDC_TIMER_10_BIT // Set duty resolution to 13 bits
@@ -39,8 +40,8 @@ int pin_states[] = {
     PIN_PDN_UART, 1,
     LEFT_DIR, 0,
     RIGHT_DIR, 1,
-    LEFT_STEP, 0,
-    RIGHT_STEP, 0
+    // LEFT_STEP, 0,
+    // RIGHT_STEP, 0
 };
 
 int step_pins[] = {LEFT_STEP, RIGHT_STEP};
@@ -223,23 +224,56 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
     static int last_throttle = 0;
     static int last_rx = 0;
 
-    int collective = gp->throttle;
+    int collective;
 
-    if(gp->break) {}
-
-    int delta = abs(last_throttle - collective);
-
-    /*
-    if((collective != 0) && (collective < 1020) && (delta < 100)) {
-        return;
-    }
-    */
-
-    if((last_throttle == collective)) {
-        // return;
+    if(gp->brake) {
+        collective = gp->brake * -3;
+    }else{
+        collective = gp->throttle * 6;
     }
 
-    last_throttle = collective;
+    int axis_x = gp->axis_rx;
+    if(abs(axis_x) < 200) {
+       axis_x = 0;
+    }
+
+    int frequency_left = collective + (axis_x * 3);
+    int frequency_right = collective - (axis_x * 3);
+
+    gpio_set_level(PIN_ENABLE, !(frequency_left || frequency_right));
+
+    // logi("left: %d  right: %d:  axis: %d\n", frequency_left, frequency_right, axis_x);
+
+    gpio_set_level(RIGHT_DIR, frequency_right > 0);
+    gpio_set_level(LEFT_DIR, frequency_left < 0);
+
+    static bool pwm_left_enabled = false;
+    static bool pwm_right_enabled = false;
+
+    if(frequency_left) {
+        if(!pwm_left_enabled){
+            configure_channel(0);
+            pwm_left_enabled = true;
+        }
+        set_frequency(0, abs(frequency_left));
+    }else if(pwm_left_enabled) {
+        ledc_stop(LEDC_MODE, 1, 0);
+        pwm_left_enabled = false;
+    }
+
+    if(frequency_right) {
+        if(!pwm_right_enabled){
+            configure_channel(1);
+            pwm_right_enabled = true;
+        }
+        set_frequency(1, abs(frequency_right));
+    }else if(pwm_right_enabled) {
+        ledc_stop(LEDC_MODE, 1, 1);
+        pwm_right_enabled = false;
+    }
+
+
+    return;
 
     if(collective == 0) {
         if(!pwm_enabled) {
