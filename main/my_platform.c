@@ -73,14 +73,13 @@ void tmc_set_register(uint8_t address, uint8_t reg, int32_t value) {
 
 void tmc_uart_init(){
     // Setup UART buffered IO with event queue
-    const int uart_buffer_size = (64);
     QueueHandle_t uart_queue;
     const uart_port_t uart_num = UART_NUM_1;
 
     // Install UART driver using an event queue here
     ESP_ERROR_CHECK(uart_driver_install(uart_num, UART_HW_FIFO_LEN(uart_num) + 4, UART_HW_FIFO_LEN(uart_num) + 4, 10, &uart_queue, 0));
     uart_config_t uart_config = {
-        .baud_rate = 460800,
+        .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -114,11 +113,17 @@ static void my_platform_init(int argc, const char **argv)
 
     tmc_uart_init();
 
+    vTaskDelay(pdMS_TO_TICKS(100));
+    tmc_set_register(0x00, 0x22, 1000);
+
+    /*
     tmc_set_register(0x00, 0x00, 0b11001000);
     vTaskDelay(pdMS_TO_TICKS(1));
     tmc_set_register(0x00, 0x10, 0x00001000);
     vTaskDelay(pdMS_TO_TICKS(1));
     tmc_set_register(0x00, 0x6C, 0x1f000053);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    tmc_set_register(0x00, 0x22, 100);
 
     vTaskDelay(pdMS_TO_TICKS(1));
     tmc_set_register(0x01, 0x00, 0b11000000);
@@ -126,6 +131,7 @@ static void my_platform_init(int argc, const char **argv)
     tmc_set_register(0x01, 0x10, 0x00001000);
     vTaskDelay(pdMS_TO_TICKS(1));
     tmc_set_register(0x01, 0x6C, 0x1f000053);
+    */
 }
 
 static void my_platform_on_init_complete(void)
@@ -184,8 +190,6 @@ static uni_error_t my_platform_on_device_ready(uni_hid_device_t *d)
 
 static void my_platform_on_controller_data(uni_hid_device_t *d, uni_controller_t *ctl)
 {
-    static uint8_t leds = 0;
-    static uint8_t enabled = true;
     static uni_controller_t prev = {0};
     uni_gamepad_t *gp;
 
