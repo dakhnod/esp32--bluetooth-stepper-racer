@@ -11,6 +11,9 @@
 #include <math.h>
 #include "esp_attr.h"
 #include <btstack.h>
+#include <esp_intr_alloc.h>
+#include <freertos/freertos.h>
+#include <freertos/task.h>
 
 #define LEDC_MODE               LEDC_HIGH_SPEED_MODE
 #define LEDC_DUTY_RES           LEDC_TIMER_10_BIT // Set duty resolution to 13 bits
@@ -31,9 +34,16 @@
 
 #define PIN_PDN_UART 16
 
+#define PIN_VIBRATION_SENSOR 23
+
 #ifndef max
 #define max(a,b) (((a) > (b)) ? (a) : (b))
 #endif
+
+void rumble(void *context);
+static btstack_context_callback_registration_t callback_registration = {
+    .callback = rumble
+};
 
 int pin_states[] = {
     PIN_ENABLE, 1,
@@ -100,6 +110,43 @@ void configure_channel(int index) {
     // ledc_stop(LEDC_MODE, index, 0);
 }
 
+void rumble(void *context) {
+    uni_hid_device_t* d;
+
+    d = uni_hid_device_get_first_device_with_state(UNI_BT_CONN_STATE_DEVICE_READY);
+
+    logi("here\n");
+
+    // Safety checks in case the gamepad got disconnected while the callback was scheduled
+    if (!d) return;
+
+    logi("found\n");
+    if (!uni_bt_conn_is_connected(&d->conn)) return;
+
+    logi("connected\n");
+
+    if (d->report_parser.play_dual_rumble != NULL) {
+        logi("rumble\n");
+        d->report_parser.play_dual_rumble(d, 0, 400, 0x80, 0x80);
+    }
+}
+
+void IRAM_ATTR gpio_isr_vibration_handler(void* arg) {
+    // Notify the task waiting on the semaphore
+    static unsigned long lastExecution = 0;
+    unsigned long now = xTaskGetTickCountFromISR();
+
+    unsigned long delta = now - lastExecution;
+
+    if(delta < 1000) {
+        return;
+    }
+    // logi("interrupt\n");
+    lastExecution = now;
+
+    btstack_run_loop_execute_on_main_thread(&callback_registration);
+}
+
 //
 // Platform Overrides
 //
@@ -120,32 +167,32 @@ static void my_platform_init(int argc, const char** argv) {
         gpio_set_level(pin_states[i], pin_states[i + 1]);
     }
 
-    return;
-
-    const esp_timer_create_args_t left_step_timer_args = {
-        .callback = &step_timer_callback,
-        .name = "left_step_timer",
-        .dispatch_method = ESP_TIMER_ISR,
-        .arg = (void*) 0
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << PIN_VIBRATION_SENSOR),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = 1,
+        .intr_type = GPIO_INTR_NEGEDGE
     };
-    ESP_ERROR_CHECK(esp_timer_create(&left_step_timer_args, step_timers + 0));
-
-    const esp_timer_create_args_t right_step_timer_args = {
-        .callback = &step_timer_callback,
-        .name = "right_step_timer",
-        .dispatch_method = ESP_TIMER_ISR,
-        .arg = (void*) 1
-    };
-    ESP_ERROR_CHECK(esp_timer_create(&right_step_timer_args, step_timers + 1));
-
-    for(int i = 0; i < sizeof(pin_states) / sizeof(pin_states[0]); i += 2) {
-        gpio_set_direction(pin_states[i], GPIO_MODE_OUTPUT);
-        gpio_set_level(pin_states[i], pin_states[i + 1]);
+    esp_err_t err = gpio_config(&io_conf);
+    if (err != ESP_OK) {
+        loge("Failed to configure GPIO: %s", esp_err_to_name(err));
+        return;
     }
 
-    ESP_ERROR_CHECK(esp_timer_start_periodic(step_timers[0], 1000));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(step_timers[1], 1000));
+    gpio_install_isr_service(ESP_INTR_FLAG_LEVEL3);
+    gpio_isr_handler_add(PIN_VIBRATION_SENSOR, gpio_isr_vibration_handler, NULL);
+
+    return;
+
+    err = gpio_isr_register(gpio_isr_vibration_handler, NULL, ESP_INTR_FLAG_LEVEL1 | ESP_INTR_FLAG_EDGE, NULL);
+    if (err != ESP_OK) {
+        loge("Failed gpio_isr_register: %s", esp_err_to_name(err));
+        return;
+    }
+
+    logi("Interrupt registered\n");
 }
+
 
 static void my_platform_on_init_complete(void) {
     logi("custom: on_init_complete()\n");
@@ -196,8 +243,6 @@ static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
 }
 
 static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
-    static uint8_t leds = 0;
-    static uint8_t enabled = true;
     static uni_controller_t prev = {0};
     uni_gamepad_t* gp;
 
@@ -218,11 +263,6 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
     }
 
     gp = &ctl->gamepad;
-
-    static bool pwm_enabled = false;
-
-    static int last_throttle = 0;
-    static int last_rx = 0;
 
     int collective;
 
@@ -271,38 +311,6 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
         ledc_stop(LEDC_MODE, 1, 1);
         pwm_right_enabled = false;
     }
-
-
-    return;
-
-    if(collective == 0) {
-        if(!pwm_enabled) {
-            return;
-        }
-        gpio_set_level(PIN_ENABLE, 1);
-
-        ledc_stop(LEDC_MODE, 0, 0);
-        ledc_stop(LEDC_MODE, 1, 0);
-
-        pwm_enabled = false;
-        return;
-    }
-
-    collective *= 6;
-
-    int axis = gp->axis_rx * 3;
-
-    set_frequency(0, max(collective + axis, 1));
-    set_frequency(1, max(collective - axis, 1));
-
-    if(!pwm_enabled) {
-        gpio_set_level(PIN_ENABLE, 0);
-        configure_channel(0);
-        configure_channel(1);
-    }
-
-    pwm_enabled = true;
-    logi("axis: %d\n", collective);
 }
 
 static const uni_property_t* my_platform_get_property(uni_property_idx_t idx) {
