@@ -7,146 +7,129 @@
 
 #include <driver/ledc.h>
 #include <driver/gpio.h>
-#include <esp_timer.h>
+#include <driver/uart.h>
 #include <math.h>
 #include "esp_attr.h"
 
-#define LEDC_MODE               LEDC_HIGH_SPEED_MODE
-#define LEDC_DUTY_RES           LEDC_TIMER_10_BIT // Set duty resolution to 13 bits
-#define LEDC_DUTY               pow(2, LEDC_DUTY_RES - 1) // Set duty to 50%. (2 ** 13) * 50% = 4096
+#define LEDC_MODE LEDC_HIGH_SPEED_MODE
+#define LEDC_DUTY_RES LEDC_TIMER_10_BIT     // Set duty resolution to 13 bits
+#define LEDC_DUTY pow(2, LEDC_DUTY_RES - 1) // Set duty to 50%. (2 ** 13) * 50% = 4096
 
 #define PIN_ENABLE 27
-
-#define LEFT_DIR 25
-#define RIGHT_DIR 32
-
-#define LEFT_STEP 26
-#define RIGHT_STEP 33
 
 #define SERVO_RIGHT_PIN 4
 #define SERVO_LEFT_PIN 15
 
 #define LED_BUILTIN 1
 
-#define PIN_PDN_UART 16
+#define UART_RX_PIN 16
+#define UART_TX_PIN 17
 
 #ifndef max
-#define max(a,b) (((a) > (b)) ? (a) : (b))
+#define max(a, b) (((a) > (b)) ? (a) : (b))
 #endif
 
 int pin_states[] = {
-    PIN_ENABLE, 1,
-    PIN_PDN_UART, 1,
-    LEFT_DIR, 0,
-    RIGHT_DIR, 1,
-    LEFT_STEP, 0,
-    RIGHT_STEP, 0
+    PIN_ENABLE, 0,
 };
 
-int step_pins[] = {LEFT_STEP, RIGHT_STEP};
-
-static esp_timer_handle_t step_timers[2];
-
 // Declarations
-static void trigger_event_on_gamepad(uni_hid_device_t* d);
+static void trigger_event_on_gamepad(uni_hid_device_t *d);
 
-volatile int step_intervals[] = {0, 0};
-volatile bool step_states[] = {false, false};
+uint8_t calculate_tmc_crc(uint8_t *data, int size)
+{
+    uint8_t crc = 0;
+    uint8_t byte;
+    for (uint8_t i = 0; i < size; ++i)
+    {
+        byte = data[i];
+        for (uint8_t j = 0; j < 8; ++j)
+        {
+            if ((crc >> 7) ^ (byte & 0x01))
+            {
+                crc = (crc << 1) ^ 0x07;
+            }
+            else
+            {
+                crc = crc << 1;
+            }
+            byte = byte >> 1;
+        }
+    }
+    return crc;
+}
 
-void IRAM_ATTR step_timer_callback(void *arg) {
-    int index = (int) arg;
+void tmc_set_register(uint8_t address, uint8_t reg, int32_t value) {
+    uint8_t frame[8] = {85, address, 0b10000000 | reg};
 
-    if(step_intervals[index] == 0) {
-        return;
+    for(int i = 0; i < 4; i++) {
+        frame[3 + i] = (value >> ((3 - i) * 8)) & 0xFF;
     }
 
-    bool state = step_states[index];
+    frame[7] = calculate_tmc_crc(frame, 7);
 
-    gpio_set_level(step_pins[index], state);
-
-    esp_timer_restart(step_timers[index], step_intervals[index]);
-
-    step_states[index] = !state;
+    uart_write_bytes(UART_NUM_1, frame, sizeof(frame));
 }
 
-void set_frequency(int index, int freq) {
-    // step_intervals[index] = 2000000 / freq;
-    // Prepare and then apply the LEDC PWM timer configuration
-    ledc_timer_config_t ledc_timer = {
-        .speed_mode       = LEDC_MODE,
-        .duty_resolution  = LEDC_DUTY_RES,
-        .timer_num        = index,
-        .freq_hz          = freq,  // Set output frequency at 4 kHz
-        .clk_cfg          = LEDC_AUTO_CLK
-        // .clk_cfg          = LEDC_USE_REF_TICK
+void tmc_uart_init(){
+    // Setup UART buffered IO with event queue
+    const int uart_buffer_size = (64);
+    QueueHandle_t uart_queue;
+    const uart_port_t uart_num = UART_NUM_1;
+
+    // Install UART driver using an event queue here
+    ESP_ERROR_CHECK(uart_driver_install(uart_num, UART_HW_FIFO_LEN(uart_num) + 4, UART_HW_FIFO_LEN(uart_num) + 4, 10, &uart_queue, 0));
+    uart_config_t uart_config = {
+        .baud_rate = 460800,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
     };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+    // Configure UART parameters
+    ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config));
+
+    ESP_ERROR_CHECK(uart_set_pin(uart_num, UART_TX_PIN, UART_RX_PIN, -1, -1));
 }
 
-void configure_channel(int index) {
-    // Prepare and then apply the LEDC PWM channel configuration
-    ledc_channel_config_t ledc_channel = {
-        .speed_mode     = LEDC_MODE,
-        .channel        = index,
-        .timer_sel      = index,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = step_pins[index],
-        .duty           = LEDC_DUTY,
-        .hpoint         = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
-
-    // ledc_stop(LEDC_MODE, index, 0);
+void set_frequency(int index, int freq)
+{
+    tmc_set_register(index, 0x22, freq);
 }
 
 //
 // Platform Overrides
 //
-static void my_platform_init(int argc, const char** argv) {
+static void my_platform_init(int argc, const char **argv)
+{
     ARG_UNUSED(argc);
     ARG_UNUSED(argv);
 
     logi("custom: init()\n");
 
-    // configure_channel(0);
-    // configure_channel(1);
-
-    // set_frequency(0, 1000);
-    // set_frequency(1, 1000);
-
-    for(int i = 0; i < sizeof(pin_states) / sizeof(pin_states[0]); i += 2) {
+    for (int i = 0; i < sizeof(pin_states) / sizeof(pin_states[0]); i += 2)
+    {
         gpio_set_direction(pin_states[i], GPIO_MODE_OUTPUT);
         gpio_set_level(pin_states[i], pin_states[i + 1]);
     }
 
-    return;
+    tmc_uart_init();
 
-    const esp_timer_create_args_t left_step_timer_args = {
-        .callback = &step_timer_callback,
-        .name = "left_step_timer",
-        .dispatch_method = ESP_TIMER_ISR,
-        .arg = (void*) 0
-    };
-    ESP_ERROR_CHECK(esp_timer_create(&left_step_timer_args, step_timers + 0));
+    tmc_set_register(0x00, 0x00, 0b11001000);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    tmc_set_register(0x00, 0x10, 0x00001000);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    tmc_set_register(0x00, 0x6C, 0x1f000053);
 
-    const esp_timer_create_args_t right_step_timer_args = {
-        .callback = &step_timer_callback,
-        .name = "right_step_timer",
-        .dispatch_method = ESP_TIMER_ISR,
-        .arg = (void*) 1
-    };
-    ESP_ERROR_CHECK(esp_timer_create(&right_step_timer_args, step_timers + 1));
-
-    for(int i = 0; i < sizeof(pin_states) / sizeof(pin_states[0]); i += 2) {
-        gpio_set_direction(pin_states[i], GPIO_MODE_OUTPUT);
-        gpio_set_level(pin_states[i], pin_states[i + 1]);
-    }
-
-    ESP_ERROR_CHECK(esp_timer_start_periodic(step_timers[0], 1000));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(step_timers[1], 1000));
+    vTaskDelay(pdMS_TO_TICKS(1));
+    tmc_set_register(0x01, 0x00, 0b11000000);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    tmc_set_register(0x01, 0x10, 0x00001000);
+    vTaskDelay(pdMS_TO_TICKS(1));
+    tmc_set_register(0x01, 0x6C, 0x1f000053);
 }
 
-static void my_platform_on_init_complete(void) {
+static void my_platform_on_init_complete(void)
+{
     logi("custom: on_init_complete()\n");
 
     // Safe to call "unsafe" functions since they are called from BT thread
@@ -162,7 +145,8 @@ static void my_platform_on_init_complete(void) {
         uni_bt_list_keys_unsafe();
 }
 
-static uni_error_t my_platform_on_device_discovered(bd_addr_t addr, const char* name, uint16_t cod, uint8_t rssi) {
+static uni_error_t my_platform_on_device_discovered(bd_addr_t addr, const char *name, uint16_t cod, uint8_t rssi)
+{
     // You can filter discovered devices here.
     // Just return any value different from UNI_ERROR_SUCCESS;
     // @param addr: the Bluetooth address
@@ -171,7 +155,8 @@ static uni_error_t my_platform_on_device_discovered(bd_addr_t addr, const char* 
     // @param rssi: Received Signal Strength Indicator (RSSI) measured in dBms. The higher (255) the better.
 
     // As an example, if you want to filter out keyboards, do:
-    if (((cod & UNI_BT_COD_MINOR_MASK) & UNI_BT_COD_MINOR_KEYBOARD) == UNI_BT_COD_MINOR_KEYBOARD) {
+    if (((cod & UNI_BT_COD_MINOR_MASK) & UNI_BT_COD_MINOR_KEYBOARD) == UNI_BT_COD_MINOR_KEYBOARD)
+    {
         logi("Ignoring keyboard\n");
         return UNI_ERROR_IGNORE_DEVICE;
     }
@@ -179,30 +164,35 @@ static uni_error_t my_platform_on_device_discovered(bd_addr_t addr, const char* 
     return UNI_ERROR_SUCCESS;
 }
 
-static void my_platform_on_device_connected(uni_hid_device_t* d) {
+static void my_platform_on_device_connected(uni_hid_device_t *d)
+{
     logi("custom: device connected: %p\n", d);
 }
 
-static void my_platform_on_device_disconnected(uni_hid_device_t* d) {
+static void my_platform_on_device_disconnected(uni_hid_device_t *d)
+{
     logi("custom: device disconnected: %p\n", d);
 }
 
-static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
+static uni_error_t my_platform_on_device_ready(uni_hid_device_t *d)
+{
     logi("custom: device ready: %p\n", d);
 
     trigger_event_on_gamepad(d);
     return UNI_ERROR_SUCCESS;
 }
 
-static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
+static void my_platform_on_controller_data(uni_hid_device_t *d, uni_controller_t *ctl)
+{
     static uint8_t leds = 0;
     static uint8_t enabled = true;
     static uni_controller_t prev = {0};
-    uni_gamepad_t* gp;
+    uni_gamepad_t *gp;
 
     // Optimization to avoid processing the previous data so that the console
     // does not get spammed with a lot of logs, but remove it from your project.
-    if (memcmp(&prev, ctl, sizeof(*ctl)) == 0) {
+    if (memcmp(&prev, ctl, sizeof(*ctl)) == 0)
+    {
         return;
     }
     prev = *ctl;
@@ -212,103 +202,73 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
     //    logi("(%p), id=%d, \n", d, uni_hid_device_get_idx_for_instance(d));
     //    uni_controller_dump(ctl);
 
-    if(ctl->klass != UNI_CONTROLLER_CLASS_GAMEPAD) {
+    if (ctl->klass != UNI_CONTROLLER_CLASS_GAMEPAD)
+    {
         return;
     }
 
     gp = &ctl->gamepad;
 
-    static bool pwm_enabled = false;
+    int collective;
 
-    static int last_throttle = 0;
-    static int last_rx = 0;
-
-    int collective = gp->throttle;
-
-    if(gp->break) {}
-
-    int delta = abs(last_throttle - collective);
-
-    /*
-    if((collective != 0) && (collective < 1020) && (delta < 100)) {
-        return;
-    }
-    */
-
-    if((last_throttle == collective)) {
-        // return;
+    if (gp->brake){
+        collective = -gp->brake;
+    }else{
+        collective = gp->throttle * 3;
     }
 
-    last_throttle = collective;
+    int axis = gp->axis_rx;
 
-    if(collective == 0) {
-        if(!pwm_enabled) {
-            return;
-        }
-        gpio_set_level(PIN_ENABLE, 1);
-
-        ledc_stop(LEDC_MODE, 0, 0);
-        ledc_stop(LEDC_MODE, 1, 0);
-
-        pwm_enabled = false;
-        return;
-    }
-
-    collective *= 6;
-
-    int axis = gp->axis_rx * 3;
-
-    set_frequency(0, max(collective + axis, 1));
-    set_frequency(1, max(collective - axis, 1));
-
-    if(!pwm_enabled) {
-        gpio_set_level(PIN_ENABLE, 0);
-        configure_channel(0);
-        configure_channel(1);
-    }
-
-    pwm_enabled = true;
-    logi("axis: %d\n", collective);
+    // set_frequency(0, collective + axis);
+    // vTaskDelay(pdMS_TO_TICKS(1));
+    set_frequency(1, collective - axis);
+    vTaskDelay(pdMS_TO_TICKS(1));
 }
 
-static const uni_property_t* my_platform_get_property(uni_property_idx_t idx) {
+static const uni_property_t *my_platform_get_property(uni_property_idx_t idx)
+{
     ARG_UNUSED(idx);
     return NULL;
 }
 
-static void my_platform_on_oob_event(uni_platform_oob_event_t event, void* data) {
-    switch (event) {
-        case UNI_PLATFORM_OOB_GAMEPAD_SYSTEM_BUTTON: {
-            uni_hid_device_t* d = data;
+static void my_platform_on_oob_event(uni_platform_oob_event_t event, void *data)
+{
+    switch (event)
+    {
+    case UNI_PLATFORM_OOB_GAMEPAD_SYSTEM_BUTTON:
+    {
+        uni_hid_device_t *d = data;
 
-            if (d == NULL) {
-                loge("ERROR: my_platform_on_oob_event: Invalid NULL device\n");
-                return;
-            }
-            logi("custom: on_device_oob_event(): %d\n", event);
-
-            trigger_event_on_gamepad(d);
-            break;
+        if (d == NULL)
+        {
+            loge("ERROR: my_platform_on_oob_event: Invalid NULL device\n");
+            return;
         }
+        logi("custom: on_device_oob_event(): %d\n", event);
 
-        case UNI_PLATFORM_OOB_BLUETOOTH_ENABLED:
-            logi("custom: Bluetooth enabled: %d\n", (bool)(data));
-            break;
+        trigger_event_on_gamepad(d);
+        break;
+    }
 
-        default:
-            logi("my_platform_on_oob_event: unsupported event: 0x%04x\n", event);
-            break;
+    case UNI_PLATFORM_OOB_BLUETOOTH_ENABLED:
+        logi("custom: Bluetooth enabled: %d\n", (bool)(data));
+        break;
+
+    default:
+        logi("my_platform_on_oob_event: unsupported event: 0x%04x\n", event);
+        break;
     }
 }
 
-static void trigger_event_on_gamepad(uni_hid_device_t* d) {
-    
+static void trigger_event_on_gamepad(uni_hid_device_t *d)
+{
 }
 
 //
 // Entry Point
 //
-struct uni_platform* get_my_platform(void) {
+struct uni_platform *get_my_platform(void)
+{
     static struct uni_platform plat = {
         .name = "custom",
         .init = my_platform_init,
