@@ -115,18 +115,11 @@ void rumble(void *context) {
 
     d = uni_hid_device_get_first_device_with_state(UNI_BT_CONN_STATE_DEVICE_READY);
 
-    logi("here\n");
-
     // Safety checks in case the gamepad got disconnected while the callback was scheduled
     if (!d) return;
-
-    logi("found\n");
     if (!uni_bt_conn_is_connected(&d->conn)) return;
 
-    logi("connected\n");
-
     if (d->report_parser.play_dual_rumble != NULL) {
-        logi("rumble\n");
         d->report_parser.play_dual_rumble(d, 0, 400, 0x80, 0x80);
     }
 }
