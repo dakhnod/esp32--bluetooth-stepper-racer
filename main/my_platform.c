@@ -19,6 +19,10 @@
 #define LEDC_DUTY_RES           LEDC_TIMER_10_BIT // Set duty resolution to 13 bits
 #define LEDC_DUTY               pow(2, LEDC_DUTY_RES - 1) // Set duty to 50%. (2 ** 13) * 50% = 4096
 
+#define LEDC_SERVO_DUTY_RES     LEDC_TIMER_11_BIT
+#define LEDC_SERVO_FREQUENCY    50
+#define LEDC_SERVO_DUTY         150
+
 #define PIN_ENABLE 27
 
 #define LEFT_DIR 25
@@ -35,6 +39,9 @@
 #define PIN_PDN_UART 16
 
 #define PIN_VIBRATION_SENSOR 23
+
+#define PIN_LEFT_SERVO 5
+#define PIN_RIGHT_SERVO 4
 
 #ifndef max
 #define max(a,b) (((a) > (b)) ? (a) : (b))
@@ -110,6 +117,19 @@ void configure_channel(int index) {
     // ledc_stop(LEDC_MODE, index, 0);
 }
 
+void configure_servo_pwm(int index) {
+    ledc_channel_config_t ledc_channel = {
+        .speed_mode     = LEDC_HIGH_SPEED_MODE,
+        .channel        = index + 2,
+        .timer_sel      = 2,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = index ? PIN_RIGHT_SERVO : PIN_LEFT_SERVO,
+        .duty           = LEDC_SERVO_DUTY,
+        .hpoint         = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+}
+
 void rumble(void *context) {
     uni_hid_device_t* d;
 
@@ -134,7 +154,6 @@ void IRAM_ATTR gpio_isr_vibration_handler(void* arg) {
     if(delta < 1000) {
         return;
     }
-    // logi("interrupt\n");
     lastExecution = now;
 
     btstack_run_loop_execute_on_main_thread(&callback_registration);
@@ -159,6 +178,18 @@ static void my_platform_init(int argc, const char** argv) {
         gpio_set_direction(pin_states[i], GPIO_MODE_OUTPUT);
         gpio_set_level(pin_states[i], pin_states[i + 1]);
     }
+
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode       = LEDC_HIGH_SPEED_MODE,
+        .duty_resolution  = LEDC_SERVO_DUTY_RES,
+        .timer_num        = 2,
+        .freq_hz          = LEDC_SERVO_FREQUENCY,  // Set output frequency at 4 kHz
+        .clk_cfg          = LEDC_AUTO_CLK
+        // .clk_cfg          = LEDC_USE_REF_TICK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+    configure_servo_pwm(0);
 
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << PIN_VIBRATION_SENSOR),
