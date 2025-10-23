@@ -12,7 +12,7 @@
 #include "esp_attr.h"
 #include <btstack.h>
 #include <esp_intr_alloc.h>
-#include <freertos/freertos.h>
+#include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #define LEDC_MODE               LEDC_HIGH_SPEED_MODE
@@ -21,7 +21,7 @@
 
 #define LEDC_SERVO_DUTY_RES     LEDC_TIMER_11_BIT
 #define LEDC_SERVO_FREQUENCY    50
-#define LEDC_SERVO_DUTY         150
+#define LEDC_HAND_SERVO_THROW   50
 
 #define PIN_ENABLE 27
 
@@ -30,9 +30,6 @@
 
 #define LEFT_STEP 26
 #define RIGHT_STEP 33
-
-#define SERVO_RIGHT_PIN 4
-#define SERVO_LEFT_PIN 15
 
 #define LED_BUILTIN 1
 
@@ -53,7 +50,7 @@ static btstack_context_callback_registration_t callback_registration = {
 };
 
 int pin_states[] = {
-    PIN_ENABLE, 1,
+    PIN_ENABLE, 0,
     PIN_PDN_UART, 1,
     LEFT_DIR, 0,
     RIGHT_DIR, 1,
@@ -124,7 +121,7 @@ void configure_servo_pwm(int index) {
         .timer_sel      = 2,
         .intr_type      = LEDC_INTR_DISABLE,
         .gpio_num       = index ? PIN_RIGHT_SERVO : PIN_LEFT_SERVO,
-        .duty           = LEDC_SERVO_DUTY,
+        .duty           = 150,
         .hpoint         = 0
     };
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
@@ -151,7 +148,7 @@ void IRAM_ATTR gpio_isr_vibration_handler(void* arg) {
 
     unsigned long delta = now - lastExecution;
 
-    if(delta < 1000) {
+    if(delta < 100) {
         return;
     }
     lastExecution = now;
@@ -190,6 +187,9 @@ static void my_platform_init(int argc, const char** argv) {
     ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
 
     configure_servo_pwm(0);
+    configure_servo_pwm(1);
+
+    ledc_fade_func_install(ESP_INTR_FLAG_LEVEL3);
 
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << PIN_VIBRATION_SENSOR),
@@ -266,21 +266,37 @@ static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
     return UNI_ERROR_SUCCESS;
 }
 
+void check_motor_control(int channel, int frequency, bool *pwm_enabled) {
+    if(frequency) {
+        if(!(*pwm_enabled)){
+            configure_channel(channel);
+            *pwm_enabled = true;
+        }
+        set_frequency(channel, abs(frequency));
+    }else if(*pwm_enabled) {
+        ledc_stop(LEDC_MODE, 1, channel);
+        *pwm_enabled = false;
+    }
+}
+
+void servos_check(int channel, bool pressed) {
+    int factor = channel ? 1 : -1;
+    ledc_set_duty_and_update(
+        LEDC_HIGH_SPEED_MODE,
+        channel + 2,
+        150 + ((pressed * LEDC_HAND_SERVO_THROW) * factor),
+        0
+    );
+}
+
 static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t* ctl) {
     static uni_controller_t prev = {0};
     uni_gamepad_t* gp;
 
-    // Optimization to avoid processing the previous data so that the console
-    // does not get spammed with a lot of logs, but remove it from your project.
     if (memcmp(&prev, ctl, sizeof(*ctl)) == 0) {
         return;
     }
     prev = *ctl;
-    // Print device Id before dumping gamepad.
-    // This could be very CPU intensive and might crash the ESP32.
-    // Remove these 2 lines in production code.
-    //    logi("(%p), id=%d, \n", d, uni_hid_device_get_idx_for_instance(d));
-    //    uni_controller_dump(ctl);
 
     if(ctl->klass != UNI_CONTROLLER_CLASS_GAMEPAD) {
         return;
@@ -308,33 +324,17 @@ static void my_platform_on_controller_data(uni_hid_device_t* d, uni_controller_t
 
     // logi("left: %d  right: %d:  axis: %d\n", frequency_left, frequency_right, axis_x);
 
-    gpio_set_level(RIGHT_DIR, frequency_right > 0);
     gpio_set_level(LEFT_DIR, frequency_left < 0);
+    gpio_set_level(RIGHT_DIR, frequency_right > 0);
 
     static bool pwm_left_enabled = false;
     static bool pwm_right_enabled = false;
 
-    if(frequency_left) {
-        if(!pwm_left_enabled){
-            configure_channel(0);
-            pwm_left_enabled = true;
-        }
-        set_frequency(0, abs(frequency_left));
-    }else if(pwm_left_enabled) {
-        ledc_stop(LEDC_MODE, 1, 0);
-        pwm_left_enabled = false;
-    }
+    check_motor_control(0, frequency_left, &pwm_left_enabled);
+    check_motor_control(1, frequency_right, &pwm_right_enabled);
 
-    if(frequency_right) {
-        if(!pwm_right_enabled){
-            configure_channel(1);
-            pwm_right_enabled = true;
-        }
-        set_frequency(1, abs(frequency_right));
-    }else if(pwm_right_enabled) {
-        ledc_stop(LEDC_MODE, 1, 1);
-        pwm_right_enabled = false;
-    }
+    servos_check(0, (gp->buttons & BUTTON_SHOULDER_L));
+    servos_check(1, (gp->buttons & BUTTON_SHOULDER_R));
 }
 
 static const uni_property_t* my_platform_get_property(uni_property_idx_t idx) {
