@@ -25,6 +25,8 @@
 #define UART_RX_PIN 16
 #define UART_TX_PIN 17
 
+#define TMC_MESSAGE_PAUSE pdMS_TO_TICKS(10)
+
 #ifndef max
 #define max(a, b) (((a) > (b)) ? (a) : (b))
 #endif
@@ -77,7 +79,7 @@ void tmc_uart_init(){
     const uart_port_t uart_num = UART_NUM_1;
 
     // Install UART driver using an event queue here
-    ESP_ERROR_CHECK(uart_driver_install(uart_num, UART_HW_FIFO_LEN(uart_num) + 4, UART_HW_FIFO_LEN(uart_num) + 4, 10, &uart_queue, 0));
+    ESP_ERROR_CHECK(uart_driver_install(uart_num, UART_HW_FIFO_LEN(uart_num) + 4, 0, 10, &uart_queue, 0));
     uart_config_t uart_config = {
         .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
@@ -118,18 +120,19 @@ static void my_platform_init(int argc, const char **argv)
 
     /*
     tmc_set_register(0x00, 0x00, 0b11001000);
-    vTaskDelay(pdMS_TO_TICKS(1));
-    tmc_set_register(0x00, 0x10, 0x00001000);
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(TMC_MESSAGE_PAUSE);
+    tmc_set_register(0x00, 0x10, 0x00001f00);
+    vTaskDelay(TMC_MESSAGE_PAUSE);
     tmc_set_register(0x00, 0x6C, 0x1f000053);
-    vTaskDelay(pdMS_TO_TICKS(1));
-    tmc_set_register(0x00, 0x22, 100);
+    vTaskDelay(TMC_MESSAGE_PAUSE);
+    tmc_set_register(0x00, 0x22, 0);
 
-    vTaskDelay(pdMS_TO_TICKS(1));
+    return;
+
     tmc_set_register(0x01, 0x00, 0b11000000);
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(TMC_MESSAGE_PAUSE);
     tmc_set_register(0x01, 0x10, 0x00001000);
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(TMC_MESSAGE_PAUSE);
     tmc_set_register(0x01, 0x6C, 0x1f000053);
     */
 }
